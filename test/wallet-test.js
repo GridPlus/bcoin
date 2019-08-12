@@ -3,7 +3,7 @@
 
 'use strict';
 
-const assert = require('./util/assert');
+const assert = require('bsert');
 const consensus = require('../lib/protocol/consensus');
 const util = require('../lib/utils/util');
 const hash256 = require('bcrypto/lib/hash256');
@@ -18,6 +18,8 @@ const Input = require('../lib/primitives/input');
 const Outpoint = require('../lib/primitives/outpoint');
 const Script = require('../lib/script/script');
 const HD = require('../lib/hd');
+const Wallet = require('../lib/wallet/wallet');
+const nodejsUtil = require('util');
 
 const KEY1 = 'xprv9s21ZrQH143K3Aj6xQBymM31Zb4BVc7wxqfUhMZrzewdDVCt'
   + 'qUP9iWfcHgJofs25xbaUpCps9GDXj83NiWvQCAkWQhVj5J4CorfnpKX94AZ';
@@ -25,8 +27,15 @@ const KEY1 = 'xprv9s21ZrQH143K3Aj6xQBymM31Zb4BVc7wxqfUhMZrzewdDVCt'
 const KEY2 = 'xprv9s21ZrQH143K3mqiSThzPtWAabQ22Pjp3uSNnZ53A5bQ4udp'
   + 'faKekc2m4AChLYH1XDzANhrSdxHYWUeTWjYJwFwWFyHkTMnMeAcW4JyRCZa';
 
-const enabled = true;
-const workers = new WorkerPool({ enabled });
+// abandon abandon... about key at m'/44'/0'/0'
+const PUBKEY = 'xpub6BosfCnifzxcFwrSzQiqu2DBVTshkCXacvNsWGYJVVhhaw'
+  + 'A7d4R5WSWGFNbi8Aw6ZRc1brxMyWMzG3DSSSSoekkudhUd9yLb6qx39T9nMdj';
+
+const workers = new WorkerPool({
+  enabled: true,
+  size: 2
+});
+
 const wdb = new WalletDB({ workers });
 
 let currentWallet = null;
@@ -55,9 +64,9 @@ function fakeBlock(height) {
   const root = hash256.digest(fromU32((height | 0x80000000) >>> 0));
 
   return {
-    hash: hash.toString('hex'),
-    prevBlock: prev.toString('hex'),
-    merkleRoot: root.toString('hex'),
+    hash: hash,
+    prevBlock: prev,
+    merkleRoot: root,
     time: 500000000 + (height * (10 * 60)),
     bits: 0,
     nonce: 0,
@@ -66,7 +75,7 @@ function fakeBlock(height) {
 }
 
 function dummyInput() {
-  const hash = random.randomBytes(32).toString('hex');
+  const hash = random.randomBytes(32);
   return Input.fromOutpoint(new Outpoint(hash, 0));
 }
 
@@ -226,14 +235,16 @@ async function testP2SH(witness, nesting) {
 }
 
 describe('Wallet', function() {
-  this.timeout(5000);
+  this.timeout(process.browser ? 20000 : 5000);
 
   before(async () => {
     await wdb.open();
+    await workers.open();
   });
 
   after(async () => {
     await wdb.close();
+    await workers.close();
   });
 
   it('should open walletdb', () => {
@@ -398,7 +409,7 @@ describe('Wallet', function() {
 
       const txs = await alice.getHistory();
       assert(txs.some((wtx) => {
-        return wtx.hash === f1.hash('hex');
+        return wtx.hash.equals(f1.hash());
       }));
     }
 
@@ -408,7 +419,7 @@ describe('Wallet', function() {
 
       const txs = await bob.getHistory();
       assert(txs.some((wtx) => {
-        return wtx.tx.hash('hex') === f1.hash('hex');
+        return wtx.tx.hash().equals(f1.hash());
       }));
     }
 
@@ -428,7 +439,7 @@ describe('Wallet', function() {
 
       const txs = await alice.getHistory();
       assert(txs.some((wtx) => {
-        return wtx.hash === f1.hash('hex');
+        return wtx.hash.equals(f1.hash());
       }));
     }
 
@@ -439,7 +450,7 @@ describe('Wallet', function() {
 
       const txs = await bob.getHistory();
       assert(txs.some((wtx) => {
-        return wtx.tx.hash('hex') === f1.hash('hex');
+        return wtx.tx.hash().equals(f1.hash());
       }));
     }
   });
@@ -511,6 +522,36 @@ describe('Wallet', function() {
     await wdb.addTX(t2.toTX());
     assert(conflict);
     assert.strictEqual((await wallet.getBalance()).unconfirmed, 0);
+  });
+
+  it('should handle double-spend (multiple inputs)', async () => {
+    const wallet = await wdb.create();
+    const address = await wallet.receiveAddress();
+
+    const hash = random.randomBytes(32);
+    const input0 = Input.fromOutpoint(new Outpoint(hash, 0));
+    const input1 = Input.fromOutpoint(new Outpoint(hash, 1));
+
+    const txa = new MTX();
+    txa.addInput(input0);
+    txa.addInput(input1);
+    txa.addOutput(address, 50000);
+    await wdb.addTX(txa.toTX());
+    assert.strictEqual((await wallet.getBalance()).unconfirmed, 50000);
+
+    let conflict = false;
+    wallet.on('conflict', () => {
+      conflict = true;
+    });
+
+    const txb = new MTX();
+    txb.addInput(input0);
+    txb.addInput(input1);
+    txb.addOutput(address, 49000);
+    await wdb.addTX(txb.toTX());
+
+    assert(conflict);
+    assert.strictEqual((await wallet.getBalance()).unconfirmed, 49000);
   });
 
   it('should handle more missed txs', async () => {
@@ -589,7 +630,7 @@ describe('Wallet', function() {
 
       const txs = await alice.getHistory();
       assert(txs.some((wtx) => {
-        return wtx.tx.hash('hex') === f1.hash('hex');
+        return wtx.tx.hash().equals(f1.hash());
       }));
     }
 
@@ -599,7 +640,7 @@ describe('Wallet', function() {
 
       const txs = await bob.getHistory();
       assert(txs.some((wtx) => {
-        return wtx.tx.hash('hex') === f1.hash('hex');
+        return wtx.tx.hash().equals(f1.hash());
       }));
     }
 
@@ -685,7 +726,7 @@ describe('Wallet', function() {
 
     // Coinbase
     const t1 = new MTX();
-    t1.addOutpoint(new Outpoint(consensus.NULL_HASH, 0));
+    t1.addOutpoint(new Outpoint(consensus.ZERO_HASH, 0));
     t1.addOutput(await alice.receiveAddress(), 5460);
     t1.addOutput(await alice.receiveAddress(), 5460);
     t1.addOutput(await alice.receiveAddress(), 5460);
@@ -823,6 +864,30 @@ describe('Wallet', function() {
     assert.strictEqual(account.accountIndex, 1);
     assert.strictEqual(account.m, 1);
     assert.strictEqual(account.n, 1);
+  });
+
+  it('should inspect Wallet', async () => {
+    const wallet = await wdb.create();
+
+    const fmt = nodejsUtil.format(wallet);
+    assert(typeof fmt === 'string');
+    assert(fmt.includes('master'));
+    assert(fmt.includes('network'));
+    assert(fmt.includes('accountDepth'));
+  });
+
+  it('should inspect Account', async () => {
+    const wallet = await wdb.create();
+    const account = await wallet.createAccount({
+      name: 'foo'
+    });
+
+    const fmt = nodejsUtil.format(account);
+    assert(typeof fmt === 'string');
+    assert(fmt.includes('name'));
+    assert(fmt.includes('foo'));
+    assert(fmt.includes('initialized'));
+    assert(fmt.includes('lookahead'));
   });
 
   it('should fail to create duplicate account', async () => {
@@ -1215,6 +1280,40 @@ describe('Wallet', function() {
     assert(t3.verify());
   });
 
+  for (const witness of [true, false]) {
+    it(`should create non-templated tx (witness=${witness})`, async () => {
+      const wallet = await wdb.create({ witness });
+
+      // Fund wallet
+      const t1 = new MTX();
+      t1.addInput(dummyInput());
+      t1.addOutput(await wallet.receiveAddress(), 500000);
+
+      await wdb.addTX(t1.toTX());
+
+      const options = {
+        rate: 10000,
+        round: true,
+        outputs: [{
+          address: await wallet.receiveAddress(),
+          value: 7000
+        }],
+        template: false
+      };
+
+      const t2 = await wallet.createTX(options);
+
+      assert(t2, 'Could not create tx.');
+
+      for (const input of t2.inputs) {
+        const {script, witness} = input;
+
+        assert.strictEqual(script.length, 0, 'Input is templated.');
+        assert.strictEqual(witness.length, 0, 'Input is templated.');
+      }
+    });
+  }
+
   it('should get range of txs', async () => {
     const wallet = currentWallet;
     const txs = await wallet.getRange(null, {
@@ -1263,9 +1362,9 @@ describe('Wallet', function() {
 
     await wallet.importKey('default', key, 'test');
 
-    const wkey = await wallet.getKey(key.getHash('hex'));
+    const wkey = await wallet.getKey(key.getHash());
 
-    assert.strictEqual(wkey.getHash('hex'), key.getHash('hex'));
+    assert.bufferEqual(wkey.getHash(), key.getHash());
 
     // Coinbase
     const t1 = new MTX();
@@ -1278,9 +1377,9 @@ describe('Wallet', function() {
 
     await wdb.addTX(t1.toTX());
 
-    const wtx = await wallet.getTX(t1.hash('hex'));
+    const wtx = await wallet.getTX(t1.hash());
     assert(wtx);
-    assert.strictEqual(t1.hash('hex'), wtx.hash);
+    assert.bufferEqual(t1.hash(), wtx.hash);
 
     const options = {
       rate: 10000,
@@ -1295,10 +1394,28 @@ describe('Wallet', function() {
     const t2 = await wallet.createTX(options);
     await wallet.sign(t2);
     assert(t2.verify());
-    assert.strictEqual(t2.inputs[0].prevout.hash, wtx.hash);
+    assert.bufferEqual(t2.inputs[0].prevout.hash, wtx.hash);
 
     importedWallet = wallet;
     importedKey = key;
+  });
+
+  it('should require account key to create watch only wallet', async () => {
+    let err = null;
+
+    try {
+      await wdb.create({
+        watchOnly: true
+      });
+    } catch (e) {
+      err = e;
+    }
+
+    assert(err);
+    assert.strictEqual(
+      err.message,
+      'Must add HD public keys to watch only wallet.'
+    );
   });
 
   it('should import pubkey', async () => {
@@ -1306,15 +1423,16 @@ describe('Wallet', function() {
     const pub = new KeyRing(key.publicKey);
 
     const wallet = await wdb.create({
-      watchOnly: true
+      watchOnly: true,
+      accountKey: PUBKEY
     });
 
     await wallet.importKey('default', pub);
 
-    const path = await wallet.getPath(pub.getHash('hex'));
-    assert.strictEqual(path.hash, pub.getHash('hex'));
+    const path = await wallet.getPath(pub.getHash());
+    assert.bufferEqual(path.hash, pub.getHash());
 
-    const wkey = await wallet.getKey(pub.getHash('hex'));
+    const wkey = await wallet.getKey(pub.getHash());
     assert(wkey);
   });
 
@@ -1322,16 +1440,17 @@ describe('Wallet', function() {
     const key = KeyRing.generate();
 
     const wallet = await wdb.create({
-      watchOnly: true
+      watchOnly: true,
+      accountKey: PUBKEY
     });
 
     await wallet.importAddress('default', key.getAddress());
 
-    const path = await wallet.getPath(key.getHash('hex'));
+    const path = await wallet.getPath(key.getHash());
     assert(path);
-    assert.strictEqual(path.hash, key.getHash('hex'));
+    assert.bufferEqual(path.hash, key.getHash());
 
-    const wkey = await wallet.getKey(key.getHash('hex'));
+    const wkey = await wallet.getKey(key.getHash());
     assert(!wkey);
   });
 
@@ -1401,7 +1520,7 @@ describe('Wallet', function() {
 
     const key = await wallet.getKey(addr);
     assert(key);
-    assert.strictEqual(key.getHash('hex'), addr.getHash('hex'));
+    assert.bufferEqual(key.getHash(), addr.getHash());
   });
 
   it('should recover from a missed tx', async () => {
@@ -1618,7 +1737,23 @@ describe('Wallet', function() {
     });
   }
 
-  it('should cleanup', () => {
+  it('should throw error with missing outputs', async () => {
+    const wallet = new Wallet({});
+
+    let err = null;
+
+    try {
+       await wallet.send({outputs: []});
+    } catch (e) {
+      err = e;
+   }
+
+    assert(err);
+    assert.equal(err.message, 'At least one output required.');
+  });
+
+  it('should cleanup', async () => {
     consensus.COINBASE_MATURITY = 100;
+    // await wdb.close();
   });
 });
